@@ -52,6 +52,6 @@ This application moves beyond basic prompting by utilizing a **Sequential Multi-
 
 You can test the live application directly in your browser. Upload your CV and see the multi-agent RAG pipeline in action without installing anything locally.
 
-👉 **[Try the Resume Wrecking Crew Here](STREAMLIT_APP_URL)**
+👉 **[Try the Resume Wrecking Crew Here](https://resume-wrecking-crew-bdqbmvpgn6b2kvmrqzcmyy.streamlit.app/)**
 
 *(Note: This application utilizes a free-tier LLM API. Occasional rate limits or brief cold-start loading times may apply).*
