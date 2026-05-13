@@ -86,30 +86,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Initialize the AI model backend globally
-@st.cache_resource(show_spinner=False)
-def setup_ai_backend(api_key_str):
-    text_generator = dspy.LM(model='groq/llama-3.1-8b-instant', api_key=api_key_str)
-    dspy.settings.configure(lm=text_generator)
+def setup_ai_backend(api_key_str, user_temp):
+    text_generator = dspy.LM(model='groq/llama-3.1-8b-instant', api_key=api_key_str, temperature=user_temp)
     return text_generator
 
 # Connect to the local Vector Database
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False) # the app should not re-initialize this connection every time the user clicks a button.
 def setup_vector_db():
     db_client = chromadb.PersistentClient(path="./resume_vector_db")
     return db_client.get_collection(name="perfect_resume_bullets")
 
-# Load the model and database
-active_ai_engine = setup_ai_backend(st.secrets["GROQ_API"])
+# Load the database
 resume_db = setup_vector_db()
 
 # Agent 1: Extracts clean data from the raw PDF text
 class ResumeParser(dspy.Signature):
+    # The following """ is not a comment, since DSPy will send it to the LLM
     """Extract and structure the core information from a raw, messy resume."""
     raw_text: str = dspy.InputField(desc="The unformatted text extracted directly from the PDF.")
     structured_summary: str = dspy.OutputField(desc="A clean, concise summary of the candidate's Skills, Experience, and Education.")
 
 # Agent 2: Critiques the parsed data based on the selected persona
 class ResumeCritic(dspy.Signature):
+    # The following """ is not a comment, since DSPy will send it to the LLM
     """You are a harsh resume critic adopting a specific persona to deliver scathing critiques."""
     roaster_persona: str = dspy.InputField(desc="The specific persona and tone the critic must adopt.")
     structured_summary: str = dspy.InputField(desc="The clean summary of the candidate's resume.")
@@ -119,11 +118,12 @@ class ResumeCritic(dspy.Signature):
 
 # Agent 3: Creates an actionable roadmap using the retrieved RAG database examples
 class ResumeStrategist(dspy.Signature):
+    # The following """ is not a comment, since DSPy will send it to the LLM
     """Analyze the critic's roast and rewrite the resume using the provided ideal database examples."""
     generated_critique: str = dspy.InputField(desc="The harsh critique provided by the critic agent.")
     structured_summary: str = dspy.InputField(desc="The original structured resume data.")
     ideal_examples: str = dspy.InputField(desc="High-quality, perfect resume bullet points retrieved from the vector database.")
-    action_plan: str = dspy.OutputField(desc="A strict, 3-step numbered roadmap to fix the resume's flaws. Reference the ideal_examples to show them how a perfect bullet point looks.")
+    action_plan: str = dspy.OutputField(desc="A strict, 3-step numbered roadmap to fix the resume's flaws. Give specific examples to help using the ideal_examples as a guide, without refrencing these ideal examples directly.")
 
 # Orchestrate the pipeline and handle the database search
 class MultiAgentPipeline(dspy.Module):
@@ -137,18 +137,19 @@ class MultiAgentPipeline(dspy.Module):
         parsed = self.parser(raw_text=raw_text)
         criticism = self.critic(roaster_persona=roaster_persona, structured_summary=parsed.structured_summary)
         
-        # RAG Search: Find the 2 most relevant perfect examples based on the candidate's summary
+        # RAG Search: Find the 3 most relevant perfect examples based on the candidate's summary
+        # R of RAG: Using semantic search, ChromaDB compares the vectors of the CV against the vectors of the perfect_resume_bullets.
         db_results = db_collection.query(
             query_texts=[parsed.structured_summary],
-            n_results=2
+            n_results=3
         )
         retrieved_examples = "\n".join(db_results['documents'][0])
         
-        # Pass everything, including the database examples, to the Strategist
+        # Pass everything, including the 3 best chosen database examples, to the Strategist
         strategy = self.strategist(
             generated_critique=criticism.generated_critique, 
             structured_summary=parsed.structured_summary,
-            ideal_examples=retrieved_examples
+            ideal_examples=retrieved_examples # A of RAG
         )
         return criticism, strategy.action_plan
 
@@ -157,7 +158,7 @@ def extract_number(score_str):
     match = re.search(r'\d+', str(score_str))
     return int(match.group()) if match else 50
 
-# Create the layout columns for the user interface
+# Create the layout columns for the user interface (SPLIT SCREEN INTO 2 COLUMNS)
 col_controls, col_arena = st.columns([1, 2], gap="large")
 
 # Render the Control Panel on the left side
@@ -165,14 +166,27 @@ with col_controls:
     st.markdown("<h1>RESUME WRECKING CREW</h1>", unsafe_allow_html=True)
     st.markdown("<p class='subtitle'>Select your nightmare recruiter and brace for impact.</p>", unsafe_allow_html=True)
     
-    selected_persona = st.selectbox(
-        "Select Interrogator:",
-        [
-            "The Tech Bro: Obsessed with buzzwords, ultimate developer mindset",
-            "The Gordon Ramsay of HR: Aggressive, screams about formatting, calls your experience 'raw'.",
-            "The Corporate Speak Master: hides behind corporate jargon."
-        ]
-    )
+    
+    use_custom_prompt = st.toggle("Turn on if you want a custom prompt")
+    if use_custom_prompt:
+        # Show a multi-line text area for the user to type their own persona
+        selected_persona = st.text_area(
+            "Enter Custom Interrogator Persona:",
+            placeholder="e.g., A Shakespearean actor who speaks in riddles, or a 1920s mafia boss...",
+            height=150
+        )
+    else:
+        selected_persona = st.selectbox(
+            "Select Interrogator:",
+            [
+                "The Tech Bro: Obsessed with buzzwords, ultimate developer mindset",
+                "The Gordon Ramsay of HR: Aggressive, screams about formatting, calls your experience 'raw'.",
+                "The Corporate Speak Master: hides behind corporate jargon."
+            ]
+        )
+    
+    creativity_level = st.slider("Creativity Level:", min_value=0, max_value=10, value=5)
+    llm_temp = creativity_level / 10.0 # Temperature is between 0 and 1
     
     st.markdown(f"""
         <div class="custom-footer">
@@ -194,11 +208,14 @@ with col_arena:
     if user_pdf_doc:
         try:
             with st.spinner(f"Initiating Multi-Agent Workflow: Parser → Critic → Strategist..."):
+                active_ai_engine = setup_ai_backend(st.secrets["GROQ_API"], llm_temp)
                 doc_parser = PyPDF2.PdfReader(user_pdf_doc)
                 extracted_text = ''.join([page.extract_text() for page in doc_parser.pages])
                 
+                # The MultiAgentPipeline class is only executed when the PDF is read (since Streamlit reads the script from top to bottom).
                 pipeline = MultiAgentPipeline()
-                critic_result, strategy_result = pipeline(raw_text=extracted_text, roaster_persona=selected_persona, db_collection=resume_db)
+                with dspy.context(lm=active_ai_engine):
+                    critic_result, strategy_result = pipeline(raw_text=extracted_text, roaster_persona=selected_persona, db_collection=resume_db)
                 
                 final_feedback = critic_result.generated_critique
                 cliche_val = extract_number(critic_result.cliche_density_score)
