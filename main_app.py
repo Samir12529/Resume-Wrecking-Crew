@@ -16,6 +16,7 @@ import streamlit as st
 import PyPDF2
 import dspy
 import re
+import time
 import chromadb
 
 # Configure the page settings for the wide dashboard
@@ -98,10 +99,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Initialize the AI model backend globally
-def setup_ai_backend(api_key_str, user_temp):
-    text_generator = dspy.LM(model='groq/openai/gpt-oss-120b', api_key=api_key_str, temperature=user_temp)
-    return text_generator
+# Initialize the AI model backends globally (Agent Routing: Fast Qwen + Deep 120B)
+def setup_ai_backends(api_key_str, user_temp):
+    fast_lm = dspy.LM(model='groq/qwen/qwen3.8-27b', api_key=api_key_str, temperature=user_temp)
+    critic_lm = dspy.LM(model='groq/openai/gpt-oss-120b', api_key=api_key_str, temperature=user_temp)
+    return fast_lm, critic_lm
 
 # Connect to the local Vector Database
 @st.cache_resource(show_spinner=False) # the app should not re-initialize this connection every time the user clicks a button.
@@ -138,32 +140,54 @@ class ResumeStrategist(dspy.Signature):
     ideal_examples: str = dspy.InputField(desc="High-quality, perfect resume bullet points retrieved from the vector database.")
     action_plan: str = dspy.OutputField(desc="A strict, 3-step numbered roadmap to fix the resume's flaws. Give specific examples to help using the ideal_examples as a guide, without refrencing these ideal examples directly.")
 
-# Orchestrate the pipeline and handle the database search
+# Orchestrate the pipeline with model routing and retry resilience
 class MultiAgentPipeline(dspy.Module):
-    def __init__(self):
+    def __init__(self, fast_lm=None, critic_lm=None):
         super().__init__()
         self.parser = dspy.ChainOfThought(ResumeParser)
         self.critic = dspy.ChainOfThought(ResumeCritic)
         self.strategist = dspy.ChainOfThought(ResumeStrategist)
+        self.fast_lm = fast_lm
+        self.critic_lm = critic_lm
+
+    def _call_agent(self, fn, max_retries=2, retry_delay=3):
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("ratelimit" in err_str or "rate limit" in err_str or "rate_limit" in err_str) and attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                raise e
 
     def forward(self, raw_text, roaster_persona, db_collection):
-        parsed = self.parser(raw_text=raw_text)
-        criticism = self.critic(roaster_persona=roaster_persona, structured_summary=parsed.structured_summary)
+        # Step 1: Parser Agent uses fast Qwen 27B model (low tokens, high quota)
+        with dspy.context(lm=self.fast_lm):
+            parsed = self._call_agent(lambda: self.parser(raw_text=raw_text))
+
+        # Step 2: Critic Agent uses flagship GPT-OSS-120B model for deep persona roasting
+        with dspy.context(lm=self.critic_lm):
+            criticism = self._call_agent(lambda: self.critic(
+                roaster_persona=roaster_persona, 
+                structured_summary=parsed.structured_summary
+            ))
         
-        # RAG Search: Find the 3 most relevant perfect examples based on the candidate's summary
-        # R of RAG: Using semantic search, ChromaDB compares the vectors of the CV against the vectors of the perfect_resume_bullets.
+        # Step 3: RAG Search: Find the 3 most relevant perfect examples based on candidate's summary
         db_results = db_collection.query(
             query_texts=[parsed.structured_summary],
             n_results=3
         )
         retrieved_examples = "\n".join(db_results['documents'][0])
         
-        # Pass everything, including the 3 best chosen database examples, to the Strategist
-        strategy = self.strategist(
-            generated_critique=criticism.generated_critique, 
-            structured_summary=parsed.structured_summary,
-            ideal_examples=retrieved_examples # A of RAG
-        )
+        # Step 4: Strategist Agent uses fast Qwen 27B model for roadmap generation
+        with dspy.context(lm=self.fast_lm):
+            strategy = self._call_agent(lambda: self.strategist(
+                generated_critique=criticism.generated_critique, 
+                structured_summary=parsed.structured_summary,
+                ideal_examples=retrieved_examples
+            ))
+            
         return criticism, strategy.action_plan
 
 # Helper function to extract numbers from the AI output metrics
@@ -220,15 +244,14 @@ with col_arena:
     
     if user_pdf_doc:
         try:
-            with st.spinner(f"Initiating Multi-Agent Workflow: Parser → Critic → Strategist..."):
-                active_ai_engine = setup_ai_backend(st.secrets["GROQ_API"], llm_temp)
+            with st.spinner("Initiating Multi-Agent Workflow: Parser (Qwen 27B) → Critic (GPT-OSS-120B) → Strategist (Qwen 27B)..."):
+                fast_engine, critic_engine = setup_ai_backends(st.secrets["GROQ_API"], llm_temp)
                 doc_parser = PyPDF2.PdfReader(user_pdf_doc)
                 extracted_text = ''.join([page.extract_text() for page in doc_parser.pages])
                 
-                # The MultiAgentPipeline class is only executed when the PDF is read (since Streamlit reads the script from top to bottom).
-                pipeline = MultiAgentPipeline()
-                with dspy.context(lm=active_ai_engine):
-                    critic_result, strategy_result = pipeline(raw_text=extracted_text, roaster_persona=selected_persona, db_collection=resume_db)
+                # Execute the routed multi-agent pipeline
+                pipeline = MultiAgentPipeline(fast_lm=fast_engine, critic_lm=critic_engine)
+                critic_result, strategy_result = pipeline(raw_text=extracted_text, roaster_persona=selected_persona, db_collection=resume_db)
                 
                 final_feedback = critic_result.generated_critique
                 cliche_val = extract_number(critic_result.cliche_density_score)
@@ -277,6 +300,10 @@ with col_arena:
             """, unsafe_allow_html=True)
 
         except Exception as e:
-            st.error(f"Something broke. Probably your unreadable formatting: {e}")
+            err_msg = str(e)
+            if "rate_limit" in err_msg.lower() or "ratelimit" in err_msg.lower():
+                st.warning("⚠️ Groq free-tier rate limit reached. The AI engine is cooling down—please wait ~5 seconds and re-upload.")
+            else:
+                st.error(f"Something broke. Probably your unreadable formatting: {e}")
     else:
         st.markdown("<div class='empty-state'>[ AWAITING RESUME UPLOAD ]</div>", unsafe_allow_html=True)
