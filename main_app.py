@@ -87,7 +87,7 @@ st.markdown("""
 
 # Initialize the AI model backend globally
 def setup_ai_backend(api_key_str, user_temp):
-    text_generator = dspy.LM(model='groq/llama-3.3-70b-versatile', api_key=api_key_str, temperature=user_temp)
+    text_generator = dspy.LM(model='groq/openai/gpt-oss-120b', api_key=api_key_str, temperature=user_temp)
     return text_generator
 
 # Connect to the local Vector Database

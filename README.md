@@ -42,7 +42,7 @@ This application moves beyond basic prompting by utilizing a **Sequential Multi-
 
 * **Front-End / UI:** Streamlit (Custom HTML/CSS/SVG integration)
 * **AI Orchestration:** DSPy (Declarative Self-Improving Language Programs)
-* **LLM API:** [Groq](https://groq.com/) (Running Llama-3.3-70b-versatile for high-performance reasoning)
+* **LLM API:** [Groq](https://groq.com/) (Running OpenAI GPT-OSS-120B for lightning-fast high-performance reasoning)
 * **Vector Database (RAG):** ChromaDB
 * **Data Processing:** PyPDF2, Sentence-Transformers
 
