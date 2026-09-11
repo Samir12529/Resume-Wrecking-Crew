@@ -87,7 +87,7 @@ st.markdown("""
 
 # Initialize the AI model backend globally
 def setup_ai_backend(api_key_str, user_temp):
-    text_generator = dspy.LM(model='groq/llama-3.1-8b-instant', api_key=api_key_str, temperature=user_temp)
+    text_generator = dspy.LM(model='groq/llama-3.3-70b-versatile', api_key=api_key_str, temperature=user_temp)
     return text_generator
 
 # Connect to the local Vector Database
@@ -156,7 +156,7 @@ class MultiAgentPipeline(dspy.Module):
 # Helper function to extract numbers from the AI output metrics
 def extract_number(score_str):
     match = re.search(r'\d+', str(score_str))
-    return int(match.group()) if match else 50
+    return max(0, min(100, int(match.group()))) if match else 50
 
 # Create the layout columns for the user interface (SPLIT SCREEN INTO 2 COLUMNS)
 col_controls, col_arena = st.columns([1, 2], gap="large")
