@@ -1,4 +1,17 @@
 # Import necessary libraries
+import numpy as np
+if not hasattr(np, 'iterable'):
+    def _iterable(y):
+        try:
+            iter(y)
+        except TypeError:
+            return False
+        return True
+    np.iterable = _iterable
+
+if not hasattr(np, 'float_'):
+    np.float_ = np.float64
+
 import streamlit as st
 import PyPDF2
 import dspy
